@@ -1,0 +1,15 @@
+name: context_time_awareness
+version: 1.0.0
+description: Inject time and event reminders into LLM context.
+author: fadhilyori
+provides_tools:
+  - add_event
+  - add_events
+  - list_events
+  - get_event
+  - update_event
+  - delete_event
+  - mark_event_complete
+provides_hooks:
+  - pre_llm_call
+  - on_session_start
