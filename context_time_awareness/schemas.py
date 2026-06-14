@@ -1,47 +1,34 @@
 """Tool schemas in OpenAI function-calling format."""
 
-_ADD_EVENT_ITEM = {
-    "type": "object",
-    "properties": {
-        "title": {
-            "type": "string",
-            "description": "Event title",
-        },
-        "start_time": {
-            "type": "string",
-            "description": (
-                "ISO 8601 start time, e.g. '2024-01-15T14:30:00' "
-                "or '2024-01-15T14:30:00+07:00'"
-            ),
-        },
-        "end_time": {
-            "type": "string",
-            "description": "Optional ISO 8601 end time",
-        },
-        "description": {
-            "type": "string",
-            "description": "Optional event details",
-        },
-        "reminder_minutes_before": {
-            "type": "integer",
-            "description": (
-                "Minutes before the event to include it in the agent's context. "
-                "Default is 5."
-            ),
-        },
+_EVENT_PROPS = {
+    "title": {"type": "string", "description": "Event title."},
+    "start_time": {
+        "type": "string",
+        "description": (
+            "ISO 8601 start time, e.g. '2024-01-15T14:30:00' "
+            "or '2024-01-15T14:30:00+07:00'."
+        ),
     },
-    "required": ["title", "start_time"],
+    "end_time": {"type": "string", "description": "Optional ISO 8601 end time."},
+    "description": {"type": "string", "description": "Optional event details."},
+    "reminder_minutes_before": {
+        "type": "integer",
+        "description": (
+            "Minutes before the event to inject it into the agent's context. "
+            "Default is 5."
+        ),
+    },
 }
 
 ADD_EVENT = {
     "name": "add_event",
     "description": (
-        "Create a new scheduled event or reminder for the user. "
+        "Create a new scheduled event or reminder. "
         "Times without a timezone are interpreted as local time."
     ),
     "parameters": {
         "type": "object",
-        "properties": _ADD_EVENT_ITEM["properties"],
+        "properties": _EVENT_PROPS,
         "required": ["title", "start_time"],
     },
 }
@@ -50,15 +37,19 @@ ADD_EVENTS = {
     "name": "add_events",
     "description": (
         "Create multiple scheduled events at once. "
-        "Useful when the user lists several schedule items in one message."
+        "Useful when the user lists several items in one message."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "events": {
                 "type": "array",
-                "items": _ADD_EVENT_ITEM,
-                "description": "List of events to create",
+                "items": {
+                    "type": "object",
+                    "properties": _EVENT_PROPS,
+                    "required": ["title", "start_time"],
+                },
+                "description": "List of events to create.",
             },
         },
         "required": ["events"],
@@ -67,7 +58,7 @@ ADD_EVENTS = {
 
 LIST_EVENTS = {
     "name": "list_events",
-    "description": "List scheduled events for the user.",
+    "description": "List scheduled events.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -77,22 +68,24 @@ LIST_EVENTS = {
                 "description": (
                     "upcoming = next 2 weeks, "
                     "past = already started, "
-                    "today = today's events in local time"
+                    "today = today's events in local time."
                 ),
-                "default": "upcoming"
+                "default": "upcoming",
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of events to return (default 10)",
-                "default": 10
+                "description": "Maximum number of events to return. Default is 10.",
+                "default": 10,
             },
             "show_completed": {
                 "type": "boolean",
                 "description": (
-                    "When true, the response includes a separate 'completed' "
-                    "section listing events that have been marked complete."
+                    "When true, also return a 'completed' section "
+                    "with events that have been marked complete. "
+                    "The 'filter' parameter applies to both the active "
+                    "and completed sections."
                 ),
-                "default": False
+                "default": False,
             },
         },
     },
@@ -104,10 +97,7 @@ GET_EVENT = {
     "parameters": {
         "type": "object",
         "properties": {
-            "event_id": {
-                "type": "string",
-                "description": "Event ID",
-            },
+            "event_id": {"type": "string", "description": "Event ID."},
         },
         "required": ["event_id"],
     },
@@ -116,35 +106,29 @@ GET_EVENT = {
 UPDATE_EVENT = {
     "name": "update_event",
     "description": (
-        "Update an existing scheduled event. "
-        "Only provided fields are changed."
+        "Update an existing event. Only provided fields are changed. "
+        "Set end_time to null to remove it. Set completed_at to null "
+        "to unmark a completed event; to mark complete, use mark_event_complete."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "event_id": {
-                "type": "string",
-                "description": "Event ID",
-            },
-            "title": {"type": "string"},
-            "start_time": {
-                "type": "string",
-                "description": "ISO 8601 start time",
-            },
+            "event_id": {"type": "string", "description": "Event ID."},
+            "title": {"type": "string", "description": "New title."},
+            "start_time": {"type": "string", "description": "ISO 8601 start time."},
             "end_time": {
                 "type": ["string", "null"],
-                "description": "Optional ISO 8601 end time. Set to null to remove.",
+                "description": "ISO 8601 end time, or null to remove it.",
             },
-            "description": {"type": "string"},
+            "description": {"type": "string", "description": "New description."},
             "reminder_minutes_before": {
                 "type": "integer",
-                "description": "Minutes before the event to include it in context",
+                "description": "Minutes before the event to inject into context.",
             },
             "completed_at": {
                 "type": "null",
                 "description": (
-                    "Set to null to mark the event as active again (unmark). "
-                    "To mark an event complete, use mark_event_complete."
+                    "Must be null. Use mark_event_complete to mark an event complete."
                 ),
             },
         },
@@ -158,10 +142,7 @@ DELETE_EVENT = {
     "parameters": {
         "type": "object",
         "properties": {
-            "event_id": {
-                "type": "string",
-                "description": "Event ID",
-            },
+            "event_id": {"type": "string", "description": "Event ID."},
         },
         "required": ["event_id"],
     },
@@ -171,17 +152,14 @@ MARK_EVENT_COMPLETE = {
     "name": "mark_event_complete",
     "description": (
         "Mark a scheduled event as complete. "
-        "Completed events no longer appear in the agent's context injection. "
-        "When list_events is called with show_completed=true, they appear in "
-        "a separate 'completed' section."
+        "Completed events are excluded from context injection and "
+        "appear in list_events only when show_completed=true. "
+        "Idempotent: marking an already-complete event is a no-op."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "event_id": {
-                "type": "string",
-                "description": "Event ID",
-            },
+            "event_id": {"type": "string", "description": "Event ID."},
         },
         "required": ["event_id"],
     },

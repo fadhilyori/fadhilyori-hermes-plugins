@@ -4,7 +4,7 @@ Injects current local time into LLM context on every turn, plus time elapsed sin
 
 **Hooks used:** `pre_llm_call`, `on_session_start`
 
-**Tools provided:** `add_event`, `add_events`, `list_events`, `get_event`, `update_event`, `delete_event`
+**Tools provided:** `add_event`, `add_events`, `list_events`, `get_event`, `update_event`, `delete_event`, `mark_event_complete`
 
 **Elapsed time format:** `1y 2M 14d 23h 14m`  
 Components with zero value are omitted. For example, `2h 0m` becomes `2h`, and durations under one minute are shown as `just now`.
@@ -28,7 +28,7 @@ When an event is within its reminder window, the hook injects it into the contex
 - **Upcoming** — the event has not started yet.
 - **Now** — the event is currently happening or has just started.
 
-The active window for context injection runs from `reminder_minutes_before` before the start time until 30 minutes after the start time. The `reminder_minutes_before` value is configurable per event; the 30-minute post-start window is fixed. The default reminder is 5 minutes.
+The active window for context injection runs from `reminder_minutes_before` before the start time until `end_time` (or 30 minutes after the start time, whichever is later). The `reminder_minutes_before` value is configurable per event; the 30-minute post-start window is fixed. The default reminder is 5 minutes.
 
 Example context:
 
@@ -44,13 +44,14 @@ Now:
 ### Tools
 
 | Tool | Description |
-|------|-------------|
+| ------ | ------------- |
 | `add_event` | Create a single event. |
 | `add_events` | Create multiple events in one call. |
 | `list_events` | List events filtered by `upcoming`, `past`, or `today`. |
 | `get_event` | Get a single event by ID. |
 | `update_event` | Update an event. Only provided fields are changed. Set `end_time` to `null` to remove it. |
 | `delete_event` | Delete an event by ID. |
+| `mark_event_complete` | Mark an event as complete. Idempotent. To unmark, pass `completed_at: null` to `update_event`. |
 
 `list_events` with `filter=upcoming` returns events scheduled within the next two weeks.
 
@@ -60,4 +61,4 @@ Now:
 
 ### Cleanup
 
-Events older than 30 days are automatically removed during `pre_llm_call`, throttled to once per hour. This keeps the local reminder store lightweight; long-term calendar tracking should remain in Google Calendar or another primary calendar integration.
+Events older than 30 days are removed once when the plugin starts. Long-term calendar tracking should remain in Google Calendar or another primary calendar integration.
