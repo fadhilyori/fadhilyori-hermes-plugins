@@ -37,7 +37,7 @@ metadata:
 | `add_events` | Create multiple events. |
 | `list_events` | List events. Use `filter=today` / `upcoming` / `past` for quick buckets, or `start_date` / `end_date` (format `YYYY-MM-DD`) for a specific date or week. |
 | `get_event` | Fetch a single event by ID. |
-| `update_event` | Change fields on an existing event. |
+| `update_event` | Change fields on an existing event. Setting `end_time: null` removes the end time. Setting `completed_at: null` unmarks a completed event (use `mark_event_complete` to mark an event complete instead). |
 | `delete_event` | Remove an event. |
 | `mark_event_complete` | Mark an event as done. Idempotent. |
 
@@ -46,15 +46,13 @@ metadata:
 Every event returned by the tools includes:
 
 - `event_id`, `title`, `description`
-- `start_time` (formatted string with timezone and a relative hint)
-- `end_time` (only present when explicitly set at creation)
+- `start_time` — e.g. `'2024-06-15 14:30 WIB (tomorrow at 14:30)'`. The relative hint is one of: `today at HH:MM`, `tomorrow at HH:MM`, `yesterday at HH:MM`, `in N days at HH:MM`, `N days ago at HH:MM`.
+- `end_time` — e.g. `'2024-12-25 13:30 WIB (1h 30m)'` (only present when set at creation).
 - `duration_minutes` — always present. Equals `(end_time - start_time) / 60`
   when `end_time` is set; otherwise defaults to **60** as a best guess.
   Treat the default as an estimate, not a guarantee.
 - `reminder_minutes_before`
 - `completed` and `completed_at`
-- `notify` — always `false`. Kept for backward compatibility with older
-  agents; the plugin no longer has a separate notify concept.
 
 ## Context injection
 
@@ -64,6 +62,7 @@ The injected block looks like:
 Current local time: 2024-06-15 14:30 WIB (Saturday, Asia/Jakarta)
 Time since last user message: 5m
 Upcoming:
+- Standup until 15:00 (in 5m)
 - Meeting with client (in 15m)
 Now:
 - Call with team (started just now)
@@ -122,12 +121,15 @@ ambiguity is possible.
   events. For recurrence, create individual events or use a primary
   calendar.
 - Events older than 30 days are removed when the plugin starts.
+- `just now` is only used in the `Time since last user message` line.
+  Event duration formatting (e.g. the value inside the `end_time`
+  output field) uses `<1m` for sub-minute durations.
 - `completed_at` cannot be set to a non-null value via
   `update_event` — use `mark_event_complete` instead. Pass
   `completed_at: null` to `update_event` to unmark a completed
   event.
-- `list_events` with `filter=upcoming` returns events scheduled
-  within the next two weeks.
+- `list_events` with `filter=upcoming` returns events in the window
+  `(now, now + 14d]` — events starting at exactly `now` are excluded.
 - `duration_minutes` defaults to 60 when `end_time` was not set at
   creation — treat it as an estimate, not a guarantee.
 - `list_events` with `start_date` / `end_date` returns events that
@@ -135,3 +137,6 @@ ambiguity is possible.
   starting the day before and ending the day after is included.
 - Respect explicit TZ offsets in ISO strings (e.g. `+07:00`).
 - Use `add_events` for bulk, not loops of `add_event`.
+- With `filter=upcoming` and `show_completed: true`, the completed
+  section is filtered by `completed_at >= now`, so it is effectively
+  empty in practice.

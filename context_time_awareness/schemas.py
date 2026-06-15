@@ -89,16 +89,21 @@ LIST_EVENTS = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of events to return. Default is 10.",
+                "description": (
+                    "Maximum number of events to return. Default is 10. "
+                    "Capped at 100."
+                ),
                 "default": 10,
             },
             "show_completed": {
                 "type": "boolean",
                 "description": (
-                    "When true, also return a 'completed' section "
-                    "with events that have been marked complete. "
-                    "The 'filter' or date range applies to both the active "
-                    "and completed sections."
+                    "Controls the response shape. When false, the response "
+                    "is a single 'events' list. When true, the response is "
+                    "split into two sections: 'active' (events that have not "
+                    "been completed) and 'completed' (events that have been "
+                    "marked complete). The 'filter' or date range applies to "
+                    "both the active and completed sections."
                 ),
                 "default": False,
             },

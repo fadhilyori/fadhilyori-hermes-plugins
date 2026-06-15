@@ -7,7 +7,7 @@ Injects current local time into LLM context on every turn, plus time elapsed sin
 **Tools provided:** `add_event`, `add_events`, `list_events`, `get_event`, `update_event`, `delete_event`, `mark_event_complete`
 
 **Elapsed time format:** `1y 2M 14d 23h 14m`  
-Components with zero value are omitted. For example, `2h 0m` becomes `2h`, and durations under one minute are shown as `just now`.
+Components with zero value are omitted. For example, `2h 0m` becomes `2h`, and durations under one minute are shown as `just now`. Event duration formatting (used in the `end_time` output field) uses `<1m` for sub-minute durations, distinct from the `just now` used in the elapsed-time line.
 
 **Dependency:**
 
@@ -37,6 +37,7 @@ Current local time: 2024-06-15 14:30 WIB (Saturday, Asia/Jakarta)
 Time since last user message: 5m
 Upcoming:
 - Meeting with client (in 15m)
+- Standup until 15:00 (in 5m)
 Now:
 - Call with team (started just now)
 ```
@@ -47,9 +48,9 @@ Now:
 | ------ | ------------- |
 | `add_event` | Create a single event. |
 | `add_events` | Create multiple events in one call. |
-| `list_events` | List events. Use `filter=today` / `upcoming` / `past` for quick buckets, or `start_date` / `end_date` (`YYYY-MM-DD`) for a specific date or week. |
+| `list_events` | List events. Use `filter=today` / `upcoming` / `past` for quick buckets, or `start_date` / `end_date` (`YYYY-MM-DD`) for a specific date or week. Returns events in the window `(now, now + 14d]` — events starting at exactly `now` are excluded. |
 | `get_event` | Get a single event by ID. |
-| `update_event` | Update an event. Only provided fields are changed. Set `end_time` to `null` to remove it. |
+| `update_event` | Update an event. Only provided fields are changed. Set `end_time` to `null` to remove it. Set `completed_at` to `null` to unmark a completed event; use `mark_event_complete` to mark an event as complete. |
 | `delete_event` | Delete an event by ID. |
 | `mark_event_complete` | Mark an event as complete. Idempotent. To unmark, pass `completed_at: null` to `update_event`. |
 
