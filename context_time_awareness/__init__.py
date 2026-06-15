@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from pathlib import Path
 from . import plugin, schemas, store, tools
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,11 @@ _TOOLS = (
 def register(ctx) -> None:
     logger.info("registering plugin")
     store.init_store()
+    
+    # Register hooks
     ctx.register_hook("pre_llm_call", plugin._inject_context)
-    ctx.register_hook("on_session_start", plugin._inject_context)
+    
+    # Register tools
     for name, schema, description in _TOOLS:
         ctx.register_tool(
             name=name,
@@ -32,3 +36,10 @@ def register(ctx) -> None:
             handler=getattr(tools, name),
             description=description,
         )
+        
+    # Register bundle skills
+    skills_dir = Path(__file__).parent / "skills"
+    for child in sorted(skills_dir.iterdir()):
+        skill_md = child / "SKILL.md"
+        if child.is_dir() and skill_md.exists():
+            ctx.register_skill(child.name, skill_md)
