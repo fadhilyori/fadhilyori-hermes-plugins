@@ -72,6 +72,21 @@ LIST_EVENTS = {
                 ),
                 "default": "upcoming",
             },
+            "start_date": {
+                "type": "string",
+                "description": (
+                    "Inclusive start of a date range in local time, "
+                    "format 'YYYY-MM-DD'. When set, overrides 'filter'."
+                ),
+            },
+            "end_date": {
+                "type": "string",
+                "description": (
+                    "Inclusive end of a date range in local time, "
+                    "format 'YYYY-MM-DD'. Requires start_date. "
+                    "When set, overrides 'filter'."
+                ),
+            },
             "limit": {
                 "type": "integer",
                 "description": "Maximum number of events to return. Default is 10.",
@@ -82,7 +97,7 @@ LIST_EVENTS = {
                 "description": (
                     "When true, also return a 'completed' section "
                     "with events that have been marked complete. "
-                    "The 'filter' parameter applies to both the active "
+                    "The 'filter' or date range applies to both the active "
                     "and completed sections."
                 ),
                 "default": False,

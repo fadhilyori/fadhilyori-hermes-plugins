@@ -12,4 +12,3 @@ provides_tools:
   - mark_event_complete
 provides_hooks:
   - pre_llm_call
-  - on_session_start

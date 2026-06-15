@@ -2,7 +2,7 @@
 
 Injects current local time into LLM context on every turn, plus time elapsed since the last user message in the same session. Also provides lightweight event scheduling so the agent can remind the user about upcoming events.
 
-**Hooks used:** `pre_llm_call`, `on_session_start`
+**Hooks used:** `pre_llm_call`
 
 **Tools provided:** `add_event`, `add_events`, `list_events`, `get_event`, `update_event`, `delete_event`, `mark_event_complete`
 
@@ -47,13 +47,32 @@ Now:
 | ------ | ------------- |
 | `add_event` | Create a single event. |
 | `add_events` | Create multiple events in one call. |
-| `list_events` | List events filtered by `upcoming`, `past`, or `today`. |
+| `list_events` | List events. Use `filter=today` / `upcoming` / `past` for quick buckets, or `start_date` / `end_date` (`YYYY-MM-DD`) for a specific date or week. |
 | `get_event` | Get a single event by ID. |
 | `update_event` | Update an event. Only provided fields are changed. Set `end_time` to `null` to remove it. |
 | `delete_event` | Delete an event by ID. |
 | `mark_event_complete` | Mark an event as complete. Idempotent. To unmark, pass `completed_at: null` to `update_event`. |
 
 `list_events` with `filter=upcoming` returns events scheduled within the next two weeks.
+
+### Date-range queries
+
+For questions about a specific date or a week, pass `start_date` and
+`end_date` to `list_events` in `YYYY-MM-DD` format (local time).
+When either is set, `filter` is ignored.
+
+- `start_date` only — a single day.
+- `start_date` + `end_date` — an inclusive range.
+- `end_date` requires `start_date` and must be on or after it.
+- An event that starts before the range and ends inside it is still
+  returned (interval-overlap rule).
+- Pass `show_completed: true` to also get completed events in the
+  same range.
+
+Event output now includes `duration_minutes`. It equals
+`(end_time - start_time) / 60` when `end_time` is set; otherwise it
+defaults to **60** as a best guess. Use it to compute free-time
+windows or to find the busiest day.
 
 ### Time input
 

@@ -20,6 +20,7 @@ DEFAULT_REMINDER_MINUTES = 5
 EVENT_RETENTION_DAYS = 30
 ACTIVE_WINDOW_AFTER_START_SECONDS = 1800
 UPCOMING_LIMIT_DAYS = 14
+DEFAULT_EVENT_DURATION_SECONDS = 3600
 
 _DateTime = _datetime.datetime
 _TzInfo = _datetime.tzinfo
@@ -170,10 +171,15 @@ def _format_event(row: tuple, local_tz: _TzInfo, now_ts: int) -> dict:
         "description": description or "",
         "start_time": f"{start_dt.strftime('%Y-%m-%d %H:%M %Z')} ({_start_time_hint(start_dt, now_dt)})",
         "reminder_minutes_before": reminder_offset // 60,
+        "duration_minutes": (
+            (end_time - start_time) // 60
+            if end_time is not None
+            else DEFAULT_EVENT_DURATION_SECONDS // 60
+        ),
         "completed": completed_at is not None,
         "completed_at": (
             _DateTime.fromtimestamp(
-                completed_at, tz=local_tz).strftime("%Y-%m-%d %H:%M %Z")
+                completed_at, tz=local_tz).strftime('%Y-%m-%d %H:%M %Z')
             if completed_at is not None
             else None
         ),
@@ -405,6 +411,68 @@ def fetch_completed_events(filter: str = "upcoming", limit: int = 10) -> list[di
         rows = []
 
     return [_format_event(row, local_tz, now) for row in rows]
+
+
+def _parse_date_range(start_date: str,
+                      end_date: str | None) -> tuple[int, int]:
+    """Parse 'YYYY-MM-DD' inputs to (start_ts, end_ts_exclusive) in local time.
+
+    end_date is inclusive: the returned end_ts is start of the day after
+    end_date, so the range can be used directly as [start, end) in SQL.
+    """
+    if not start_date:
+        raise ValueError("start_date is required")
+    start_ts = _parse_datetime(start_date)
+    if not end_date:
+        return start_ts, start_ts + 86400
+    end_ts = _parse_datetime(end_date)
+    if end_ts < start_ts:
+        raise ValueError(
+            f"end_date ({end_date}) must be on or after start_date ({start_date})")
+    end_local_next = (
+        _DateTime.fromtimestamp(end_ts, tz=_resolve_local_tz())
+        + _datetime.timedelta(days=1)
+    )
+    return start_ts, int(end_local_next.timestamp())
+
+
+def fetch_events_by_range(start_ts: int,
+                          end_ts: int,
+                          limit: int = 100) -> list[dict]:
+    """Return active events overlapping [start_ts, end_ts).
+
+    An event is included if its start_time is before end_ts AND
+    (end_time is null OR end_time is after start_ts). Events without
+    completed_at only. Sorted ascending by start_time.
+    """
+    if _store is None:
+        return []
+    limit = max(1, min(int(limit), 100))
+    local_tz = _resolve_local_tz()
+    rows = _store.execute(
+        "SELECT * FROM events WHERE completed_at IS NULL "
+        "AND start_time < ? AND (end_time IS NULL OR end_time > ?) "
+        "ORDER BY start_time ASC LIMIT ?",
+        (end_ts, start_ts, limit),
+    ).fetchall()
+    return [_format_event(row, local_tz, int(time.time())) for row in rows]
+
+
+def fetch_completed_events_by_range(start_ts: int,
+                                    end_ts: int,
+                                    limit: int = 100) -> list[dict]:
+    """Return completed events whose completed_at falls in [start_ts, end_ts)."""
+    if _store is None:
+        return []
+    limit = max(1, min(int(limit), 100))
+    local_tz = _resolve_local_tz()
+    rows = _store.execute(
+        "SELECT * FROM events WHERE completed_at IS NOT NULL "
+        "AND completed_at >= ? AND completed_at < ? "
+        "ORDER BY completed_at DESC LIMIT ?",
+        (start_ts, end_ts, limit),
+    ).fetchall()
+    return [_format_event(row, local_tz, int(time.time())) for row in rows]
 
 
 def cleanup_old_events(retention_days: int = EVENT_RETENTION_DAYS) -> int:

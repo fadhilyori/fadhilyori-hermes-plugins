@@ -65,6 +65,25 @@ def list_events(args: dict, **kwargs) -> str:
         return _err("limit must be an integer")
     show_completed = bool(args.get("show_completed", False))
 
+    start_date = (args.get("start_date") or "").strip()
+    end_date = (args.get("end_date") or "").strip()
+
+    if start_date or end_date:
+        try:
+            start_ts, end_ts = store._parse_date_range(start_date, end_date)
+        except ValueError as e:
+            return _err(str(e))
+        try:
+            events = store.fetch_events_by_range(
+                start_ts, end_ts, limit=limit)
+        except (ValueError, RuntimeError) as e:
+            return _err(str(e))
+        if show_completed:
+            completed = store.fetch_completed_events_by_range(
+                start_ts, end_ts, limit=limit)
+            return json.dumps({"active": events, "completed": completed})
+        return json.dumps({"events": events})
+
     try:
         events = store.fetch_events(filter=filter_value, limit=limit)
     except (ValueError, RuntimeError) as e:

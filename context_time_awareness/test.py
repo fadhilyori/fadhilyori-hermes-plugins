@@ -439,12 +439,14 @@ class TestRegister(unittest.TestCase):
             def register_tool(self, **kwargs):
                 tools_called.append(kwargs["name"])
 
+            def register_skill(self, *args, **kwargs):
+                pass
+
         register(MockCtx())
         self.assertEqual(
             hooks,
             [
                 ("pre_llm_call", "_inject_context"),
-                ("on_session_start", "_inject_context"),
             ],
         )
         self.assertEqual(
@@ -1031,6 +1033,237 @@ class TestUnmarkComplete(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.modify_event(
                 self.event["event_id"], completed_at="2024-01-01T00:00:00")
+
+
+class TestParseDateRange(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir, self.patcher = _temp_store()
+
+    def tearDown(self):
+        _cleanup_temp_store(self.tmpdir, self.patcher)
+
+    def test_single_day_returns_24h_range(self):
+        start, end = store._parse_date_range("2026-06-15", None)
+        self.assertEqual(end - start, 86400)
+
+    def test_multi_day_returns_inclusive_end(self):
+        start, end = store._parse_date_range("2026-06-15", "2026-06-21")
+        # 7 days inclusive: 6 full days + 1 partial = 7 * 86400
+        self.assertEqual(end - start, 7 * 86400)
+
+    def test_empty_start_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            store._parse_date_range("", None)
+        self.assertIn("start_date is required", str(ctx.exception))
+
+    def test_end_before_start_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            store._parse_date_range("2026-06-21", "2026-06-15")
+        self.assertIn("must be on or after", str(ctx.exception))
+
+    def test_invalid_format_raises(self):
+        with self.assertRaises(ValueError):
+            store._parse_date_range("besok", None)
+        with self.assertRaises(ValueError):
+            store._parse_date_range("2026/06/15", None)
+        with self.assertRaises(ValueError):
+            store._parse_date_range("2026-6-15", None)
+
+
+class TestFetchEventsByRange(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir, self.patcher = _temp_store()
+        self.tz = store._resolve_local_tz()
+        self.now = int(time.time())
+        # Build a known week starting from "tomorrow" local time.
+        self.tomorrow = self.now + 86400
+        self.week_start = _datetime.datetime.fromtimestamp(
+            self.tomorrow, tz=self.tz).strftime("%Y-%m-%d")
+        self.week_end = _datetime.datetime.fromtimestamp(
+            self.now + 7 * 86400, tz=self.tz).strftime("%Y-%m-%d")
+        self.day = lambda d, h=12: self.tomorrow + d * 86400 + (h - 12) * 3600
+        store.create_event(
+            title="Mon", start_time=self._iso(self.day(0, 9), 60))
+        store.create_event(
+            title="Wed", start_time=self._iso(self.day(2, 14), 30))
+        store.create_event(
+            title="NoEnd", start_time=self._iso(self.day(3, 10)))
+        # Event that starts before the range and ends inside it.
+        store.create_event(
+            title="Straddle", start_time=self._iso(self.day(-1, 22), 8 * 60))
+
+    def tearDown(self):
+        _cleanup_temp_store(self.tmpdir, self.patcher)
+
+    def _iso(self, start_ts, duration_minutes=None):
+        s = _datetime.datetime.fromtimestamp(
+            start_ts, tz=self.tz).isoformat()
+        if duration_minutes is None:
+            return s
+        return s
+
+    def test_includes_events_starting_in_range(self):
+        start, end = store._parse_date_range(self.week_start, self.week_end)
+        events = store.fetch_events_by_range(start, end)
+        titles = {e["title"] for e in events}
+        self.assertIn("Mon", titles)
+        self.assertIn("Wed", titles)
+        self.assertIn("NoEnd", titles)
+
+    def test_includes_straddling_event(self):
+        start, end = store._parse_date_range(self.week_start, self.week_end)
+        events = store.fetch_events_by_range(start, end)
+        titles = {e["title"] for e in events}
+        self.assertIn("Straddle", titles)
+
+    def test_excludes_completed_events(self):
+        # Mark Wed as complete; it should no longer appear.
+        all_events = store.fetch_events(filter="upcoming", limit=100)
+        wed = next(e for e in all_events if e["title"] == "Wed")
+        store.mark_event_complete(wed["event_id"])
+        start, end = store._parse_date_range(self.week_start, self.week_end)
+        events = store.fetch_events_by_range(start, end)
+        titles = {e["title"] for e in events}
+        self.assertNotIn("Wed", titles)
+
+    def test_completed_by_range_filters_by_completed_at(self):
+        all_events = store.fetch_events(filter="upcoming", limit=100)
+        wed = next(e for e in all_events if e["title"] == "Wed")
+        store.mark_event_complete(wed["event_id"])
+        start, end = self.now - 3600, self.now + 3600
+        completed = store.fetch_completed_events_by_range(start, end)
+        titles = {e["title"] for e in completed}
+        self.assertIn("Wed", titles)
+
+
+class TestFormatEventDuration(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir, self.patcher = _temp_store()
+
+    def tearDown(self):
+        _cleanup_temp_store(self.tmpdir, self.patcher)
+
+    def test_duration_minutes_with_end_time(self):
+        start = _datetime.datetime(2026, 6, 15, 14, 0, tzinfo=_datetime.timezone.utc)
+        end = _datetime.datetime(2026, 6, 15, 15, 30, tzinfo=_datetime.timezone.utc)
+        e = store.create_event(
+            title="Meeting",
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+        )
+        self.assertEqual(e["duration_minutes"], 90)
+
+    def test_duration_minutes_defaults_to_60_without_end_time(self):
+        start = _datetime.datetime(2026, 6, 15, 14, 0, tzinfo=_datetime.timezone.utc)
+        e = store.create_event(title="Reminder", start_time=start.isoformat())
+        self.assertIsNone(e.get("end_time"))
+        self.assertEqual(e["duration_minutes"], 60)
+
+
+class TestListEventsHandlerDateRange(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir, self.patcher = _temp_store()
+        self.tz = store._resolve_local_tz()
+        self.now = int(time.time())
+        self.tomorrow = self.now + 86400
+        self.tomorrow_str = _datetime.datetime.fromtimestamp(
+            self.tomorrow, tz=self.tz).strftime("%Y-%m-%d")
+        self.week_end_str = _datetime.datetime.fromtimestamp(
+            self.now + 7 * 86400, tz=self.tz).strftime("%Y-%m-%d")
+        self.day = lambda d, h=12: self.tomorrow + d * 86400 + (h - 12) * 3600
+        store.create_event(
+            title="Mon", start_time=self._iso(self.day(0, 9), 60))
+        store.create_event(
+            title="Wed", start_time=self._iso(self.day(2, 14), 30))
+
+    def tearDown(self):
+        _cleanup_temp_store(self.tmpdir, self.patcher)
+
+    def _iso(self, start_ts, duration_minutes):
+        end_ts = start_ts + duration_minutes * 60
+        s = _datetime.datetime.fromtimestamp(start_ts, tz=self.tz).isoformat()
+        e = _datetime.datetime.fromtimestamp(end_ts, tz=self.tz).isoformat()
+        return s
+
+    def test_start_date_single_day(self):
+        result = tools.list_events({"start_date": self.tomorrow_str})
+        data = json.loads(result)
+        titles = [e["title"] for e in data["events"]]
+        self.assertEqual(titles, ["Mon"])
+
+    def test_date_range_multi_day(self):
+        result = tools.list_events({
+            "start_date": self.tomorrow_str,
+            "end_date": self.week_end_str,
+        })
+        data = json.loads(result)
+        titles = [e["title"] for e in data["events"]]
+        self.assertIn("Mon", titles)
+        self.assertIn("Wed", titles)
+
+    def test_invalid_date_returns_error(self):
+        result = tools.list_events({"start_date": "besok"})
+        data = json.loads(result)
+        self.assertIn("error", data)
+
+    def test_end_before_start_returns_error(self):
+        result = tools.list_events({
+            "start_date": self.week_end_str,
+            "end_date": self.tomorrow_str,
+        })
+        data = json.loads(result)
+        self.assertIn("error", data)
+        self.assertIn("must be on or after", data["error"])
+
+    def test_end_without_start_returns_error(self):
+        result = tools.list_events({"end_date": self.week_end_str})
+        data = json.loads(result)
+        self.assertIn("error", data)
+        self.assertIn("start_date is required", data["error"])
+
+    def test_start_date_overrides_filter(self):
+        # filter=upcoming would return events by start_time ordering;
+        # start_date with a specific date must take precedence and
+        # only return events in that local day.
+        result = tools.list_events({
+            "filter": "upcoming",
+            "start_date": self.tomorrow_str,
+        })
+        data = json.loads(result)
+        titles = [e["title"] for e in data["events"]]
+        self.assertEqual(titles, ["Mon"])
+
+    def test_show_completed_with_range(self):
+        wed = next(
+            e for e in store.fetch_events(filter="upcoming", limit=100)
+            if e["title"] == "Wed")
+        store.mark_event_complete(wed["event_id"])
+        today_str = _datetime.datetime.fromtimestamp(
+            self.now, tz=self.tz).strftime("%Y-%m-%d")
+        tomorrow_str = _datetime.datetime.fromtimestamp(
+            self.now + 86400, tz=self.tz).strftime("%Y-%m-%d")
+        result = tools.list_events({
+            "start_date": today_str,
+            "end_date": tomorrow_str,
+            "show_completed": True,
+        })
+        data = json.loads(result)
+        active_titles = [e["title"] for e in data["active"]]
+        completed_titles = [e["title"] for e in data["completed"]]
+        self.assertNotIn("Wed", active_titles)
+        self.assertIn("Wed", completed_titles)
+
+    def test_get_event_includes_duration_minutes(self):
+        start = _datetime.datetime(2026, 6, 15, 14, 0, tzinfo=_datetime.timezone.utc)
+        end = _datetime.datetime(2026, 6, 15, 15, 30, tzinfo=_datetime.timezone.utc)
+        e = store.create_event(
+            title="Standup",
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+        )
+        result = tools.get_event({"event_id": e["event_id"]})
+        data = json.loads(result)
+        self.assertEqual(data["event"]["duration_minutes"], 90)
 
 
 if __name__ == "__main__":
