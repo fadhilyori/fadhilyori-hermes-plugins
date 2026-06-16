@@ -1,6 +1,8 @@
 """Tool handlers for the scheduler toolset."""
 
 import json
+from datetime import datetime
+from dataclasses import asdict
 
 from . import store
 
@@ -14,26 +16,42 @@ def _err(message: str) -> str:
 
 
 def add_event(args: dict, **kwargs) -> str:
-    title = (args.get("title") or "").strip()
-    start_time = (args.get("start_time") or "").strip()
+    store.cleanup_old_events()
+
+    title: str | None = (args.get("title") or "").strip()
+    start_time: str | None = (args.get("start_time") or "").strip()
+    end_time: str | None = (args.get("end_time") or "").strip()
+    description: str | None = (args.get("description") or "").strip()
+    reminder_minutes_before: int | None = args.get("reminder_minutes_before")
+
     if not title:
         return _err("title is required")
     if not start_time:
         return _err("start_time is required")
+    if reminder_minutes_before is None:
+        reminder_minutes_before = 5
+
+    start_time_dt = datetime.fromisoformat(start_time)
+    if end_time:
+        end_time_dt = datetime.fromisoformat(end_time)
+    else:
+        end_time_dt = None
+
     try:
-        event = store.create_event(
+        event = store.create_event(store.EventSchema(
             title=title,
-            start_time=start_time,
-            end_time=args.get("end_time"),
-            description=args.get("description"),
-            reminder_minutes_before=args.get("reminder_minutes_before", 5),
-        )
-        return _ok({"event": event})
+            start_time=start_time_dt,
+            end_time=end_time_dt,
+            description=description,
+            reminder_offset=reminder_minutes_before * 60,
+        ))
+        return _ok({"event": asdict(event)})
     except (ValueError, RuntimeError) as e:
         return _err(str(e))
 
 
 def add_events(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     events = args.get("events", [])
     if not isinstance(events, list):
         return _err("events must be a list")
@@ -56,6 +74,7 @@ def add_events(args: dict, **kwargs) -> str:
 
 
 def list_events(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     filter_value = args.get("filter", "upcoming")
     if filter_value not in {"upcoming", "past", "today"}:
         return _err("filter must be 'upcoming', 'past', or 'today'")
@@ -97,6 +116,7 @@ def list_events(args: dict, **kwargs) -> str:
 
 
 def get_event(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     event_id = (args.get("event_id") or "").strip()
     if not event_id:
         return _err("event_id is required")
@@ -110,6 +130,7 @@ def get_event(args: dict, **kwargs) -> str:
 
 
 def update_event(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     event_id = (args.get("event_id") or "").strip()
     if not event_id:
         return _err("event_id is required")
@@ -133,6 +154,7 @@ def update_event(args: dict, **kwargs) -> str:
 
 
 def delete_event(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     event_id = (args.get("event_id") or "").strip()
     if not event_id:
         return _err("event_id is required")
@@ -145,6 +167,7 @@ def delete_event(args: dict, **kwargs) -> str:
 
 
 def mark_event_complete(args: dict, **kwargs) -> str:
+    store.cleanup_old_events()
     event_id = (args.get("event_id") or "").strip()
     if not event_id:
         return _err("event_id is required")

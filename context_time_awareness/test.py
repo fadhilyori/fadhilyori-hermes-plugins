@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
 from context_time_awareness import plugin, register, store, tools
@@ -543,10 +544,16 @@ class TestToolHandlers(unittest.TestCase):
         self.assertIn("at least one field", data["error"])
 
     def test_update_event_remove_end_time(self):
+        start_time = (
+            _datetime.datetime.now().astimezone() + _datetime.timedelta(days=7)
+        ).replace(microsecond=0).isoformat()
+        end_time = (
+            _datetime.datetime.now().astimezone() + _datetime.timedelta(days=7, hours=1)
+        ).replace(microsecond=0).isoformat()
         created = store.create_event(
             title="Meeting",
-            start_time="2024-12-25T10:00:00",
-            end_time="2024-12-25T11:00:00",
+            start_time=start_time,
+            end_time=end_time,
         )
         result = tools.update_event({
             "event_id": created["event_id"],
@@ -565,9 +572,12 @@ class TestToolHandlers(unittest.TestCase):
         self.assertIn("error", data)
 
     def test_update_event_partial_update(self):
+        start_time = (
+            _datetime.datetime.now().astimezone() + _datetime.timedelta(days=7)
+        ).replace(microsecond=0).isoformat()
         created = store.create_event(
             title="Old Title",
-            start_time="2024-12-25T10:00:00",
+            start_time=start_time,
         )
         result = tools.update_event({
             "event_id": created["event_id"],
@@ -705,7 +715,9 @@ class TestMarkComplete(unittest.TestCase):
         self.tmpdir, self.patcher = _temp_store()
         self.event = store.create_event(
             title="To Complete",
-            start_time="2024-12-25T15:00:00",
+            start_time=(
+                _datetime.datetime.now().astimezone() + _datetime.timedelta(days=7)
+            ).replace(microsecond=0).isoformat(),
         )
 
     def tearDown(self):
@@ -925,7 +937,7 @@ class TestListEventsShowCompleted(unittest.TestCase):
     def test_show_completed_with_upcoming_filter_excludes_completed(self):
         """With filter='upcoming', a completed event with
         completed_at < now is excluded from the completed list."""
-        active = store.create_event(
+        store.create_event(
             title="UpcomingActive",
             start_time=_datetime.datetime.fromtimestamp(
                 self.now + 3600, tz=_datetime.timezone.utc).isoformat(),
@@ -966,7 +978,7 @@ class TestListEventsShowCompleted(unittest.TestCase):
             start_time=_datetime.datetime.fromtimestamp(
                 self.now + 3600, tz=_datetime.timezone.utc).isoformat(),
         )
-        with patch.object(store, "fetch_completed_events", wraps=store.fetch_completed_events) as spy:
+        with patch.object(store, "fetch_completed_events", wraps=store.fetch_completed_events):
             # Manually backdate completed_at for done_other to far past.
             store._store.execute(
                 "UPDATE events SET completed_at = ? WHERE event_id = ?",
@@ -998,7 +1010,9 @@ class TestUnmarkComplete(unittest.TestCase):
         self.tmpdir, self.patcher = _temp_store()
         self.event = store.create_event(
             title="To Unmark",
-            start_time="2024-12-25T15:00:00",
+            start_time=(
+                _datetime.datetime.now().astimezone() + _datetime.timedelta(days=7)
+            ).replace(microsecond=0).isoformat(),
         )
 
     def tearDown(self):
@@ -1171,19 +1185,19 @@ class TestListEventsHandlerDateRange(unittest.TestCase):
         self.week_end_str = _datetime.datetime.fromtimestamp(
             self.now + 7 * 86400, tz=self.tz).strftime("%Y-%m-%d")
         self.day = lambda d, h=12: self.tomorrow + d * 86400 + (h - 12) * 3600
-        store.create_event(
-            title="Mon", start_time=self._iso(self.day(0, 9), 60))
-        store.create_event(
-            title="Wed", start_time=self._iso(self.day(2, 14), 30))
+        mon_start, mon_end = self._iso(self.day(0, 9), 60)
+        store.create_event(title="Mon", start_time=mon_start, end_time=mon_end)
+        wed_start, wed_end = self._iso(self.day(2, 14), 30)
+        store.create_event(title="Wed", start_time=wed_start, end_time=wed_end)
 
     def tearDown(self):
         _cleanup_temp_store(self.tmpdir, self.patcher)
 
     def _iso(self, start_ts, duration_minutes):
-        end_ts = start_ts + duration_minutes * 60
         s = _datetime.datetime.fromtimestamp(start_ts, tz=self.tz).isoformat()
+        end_ts = start_ts + duration_minutes * 60
         e = _datetime.datetime.fromtimestamp(end_ts, tz=self.tz).isoformat()
-        return s
+        return s, e
 
     def test_start_date_single_day(self):
         result = tools.list_events({"start_date": self.tomorrow_str})
@@ -1264,6 +1278,76 @@ class TestListEventsHandlerDateRange(unittest.TestCase):
         result = tools.get_event({"event_id": e["event_id"]})
         data = json.loads(result)
         self.assertEqual(data["event"]["duration_minutes"], 90)
+
+
+class TestCleanupOnToolCall(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir, self.patcher = _temp_store()
+        self.now = int(time.time())
+        old_iso = _datetime.datetime.fromtimestamp(
+            self.now - 31 * 86400, tz=_datetime.timezone.utc
+        ).isoformat()
+        old = store.create_event(title="old", start_time=old_iso)
+        self.old_event_id = old["event_id"]
+
+    def tearDown(self):
+        _cleanup_temp_store(self.tmpdir, self.patcher)
+
+    def test_add_event_triggers_cleanup_of_old_event(self):
+        new_iso = _datetime.datetime.fromtimestamp(
+            self.now + 3600, tz=_datetime.timezone.utc
+        ).isoformat()
+        result = tools.add_event({"title": "new", "start_time": new_iso})
+        data = json.loads(result)
+        self.assertTrue(data["success"])
+        self.assertIsNone(store.fetch_event(self.old_event_id))
+        new_event = store.fetch_event(data["event"]["event_id"])
+        self.assertIsNotNone(new_event)
+        self.assertEqual(new_event["title"], "new")
+
+
+class TestFormatRelativedelta(unittest.TestCase):
+    def test_empty_relativedelta_returns_less_than_one_minute(self):
+        self.assertEqual(store._format_relativedelta(relativedelta()), "<1m")
+
+    def test_only_years(self):
+        self.assertEqual(store._format_relativedelta(relativedelta(years=1)), "1y")
+
+    def test_only_months(self):
+        self.assertEqual(store._format_relativedelta(relativedelta(months=2)), "2M")
+
+    def test_only_days(self):
+        self.assertEqual(store._format_relativedelta(relativedelta(days=3)), "3d")
+
+    def test_only_hours(self):
+        self.assertEqual(store._format_relativedelta(relativedelta(hours=4)), "4h")
+
+    def test_only_minutes(self):
+        self.assertEqual(store._format_relativedelta(relativedelta(minutes=5)), "5m")
+
+    def test_all_units_combined(self):
+        self.assertEqual(
+            store._format_relativedelta(
+                relativedelta(years=1, months=2, days=3, hours=4, minutes=5)
+            ),
+            "1y 2M 3d 4h 5m",
+        )
+
+    def test_zero_values_are_skipped(self):
+        self.assertEqual(
+            store._format_relativedelta(
+                relativedelta(years=1, months=0, days=0, hours=2, minutes=0)
+            ),
+            "1y 2h",
+        )
+
+    def test_larger_values(self):
+        self.assertEqual(
+            store._format_relativedelta(
+                relativedelta(years=10, months=11, days=28, hours=23, minutes=59)
+            ),
+            "10y 11M 28d 23h 59m",
+        )
 
 
 if __name__ == "__main__":

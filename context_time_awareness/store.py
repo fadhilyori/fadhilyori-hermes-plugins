@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import datetime as _datetime
 import logging
 import os
 import sqlite3
 import threading
 import time
 import uuid
-import datetime as _datetime
-from dateutil.relativedelta import relativedelta
+from datetime import datetime, timedelta, timezone
+from datetime import time as t
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import humanize
+from dateutil.relativedelta import relativedelta
+from tzlocal import get_localzone
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +28,66 @@ ACTIVE_WINDOW_AFTER_START_SECONDS = 1800
 UPCOMING_LIMIT_DAYS = 14
 DEFAULT_EVENT_DURATION_SECONDS = 3600
 
-_DateTime = _datetime.datetime
-_TzInfo = _datetime.tzinfo
-
 _store: sqlite3.Connection | None = None
 _store_lock = threading.Lock()
+
+
+@dataclass
+class EventSchema():
+    id: str = field(init=False)
+    title: str
+    description: str | None
+    start_time: datetime
+    end_time: datetime | None
+    reminder_offset: int = 0
+    completed_at: datetime | None = field(init=False)
+    created_at: datetime | None = field(init=False)
+    updated_at: datetime | None = field(init=False)
+
+    def __post_init__(self):
+        now, _ = get_current_time()
+        self.id = str(uuid.uuid4())
+        self.completed_at = None
+        self.created_at = now
+        self.updated_at = now
+
+    @property
+    def start_in(self):
+        now, _ = get_current_time()
+        return humanize.naturaltime(self.start_time - now)
+
+    @property
+    def end_in(self):
+        now, _ = get_current_time()
+
+        if not self.end_time:
+            end_time = self.start_time + timedelta(seconds=DEFAULT_EVENT_DURATION_SECONDS)
+            return humanize.naturaltime(end_time - now)
+
+        return humanize.naturaltime(self.end_time - now)
+
+    @property
+    def reminder_offset_minutes(self):
+        return self.reminder_offset // 60
+
+    @property
+    def is_time_to_remind(self):
+        now, _ = get_current_time()
+
+        return self.reminder_offset and self.start_time - timedelta(seconds=self.reminder_offset) < now
+
+    @property
+    def duration_humanized(self):
+        if not self.end_time:
+            return humanize.naturaldelta(timedelta(seconds=DEFAULT_EVENT_DURATION_SECONDS))
+        return humanize.naturaldelta(self.end_time - self.start_time)
+
+def eventschema_factory(cursor, row) -> EventSchema:
+    columns = [col[0] for col in cursor.description]
+
+    row_dict = dict(zip(columns, row))
+
+    return EventSchema(**row_dict)
 
 
 def _resolve_local_tz() -> _TzInfo:
@@ -41,41 +102,47 @@ def _resolve_local_tz() -> _TzInfo:
 
 def _open_store() -> sqlite3.Connection:
     path = os.path.join(PLUGIN_DIR, DB_FILENAME)
-    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS /
-                           1000.0, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS sessions ("
-        "id TEXT PRIMARY KEY, ts INTEGER NOT NULL)"
+    sqlite3.register_adapter(datetime, lambda dt: dt.timestamp())
+    sqlite3.register_converter(
+        "TIMESTAMP", lambda ts: datetime.fromtimestamp(float(ts), tz=timezone.utc))
+    conn = sqlite3.connect(
+        path,
+        timeout=BUSY_TIMEOUT_MS / 1000.0,
+        check_same_thread=False,
+        detect_types=sqlite3.PARSE_DECLTYPES,
     )
-    conn.execute(
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, updated_at TIMESTAMP NOT NULL)"
+    )
+    cursor.execute(
         "CREATE TABLE IF NOT EXISTS events ("
-        "event_id TEXT PRIMARY KEY, "
+        "id TEXT PRIMARY KEY, "
         "title TEXT NOT NULL, "
         "description TEXT DEFAULT '', "
-        "start_time INTEGER NOT NULL, "
-        "end_time INTEGER, "
+        "start_time TIMESTAMP NOT NULL, "
+        "end_time TIMESTAMP, "
         "reminder_offset INTEGER NOT NULL DEFAULT 300, "
-        "completed_at INTEGER, "
-        "created_at INTEGER NOT NULL, "
-        "updated_at INTEGER NOT NULL)"
+        "completed_at TIMESTAMP, "
+        "created_at TIMESTAMP NOT NULL, "
+        "updated_at TIMESTAMP NOT NULL)"
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time)"
+    )
+    conn.commit()
     return conn
 
 
 def init_store() -> None:
     global _store
     _store = _open_store()
-    cutoff = int(time.time()) - EVENT_RETENTION_DAYS * 86400
-    with _store_lock:
-        cur = _store.execute(
-            "DELETE FROM events WHERE start_time < ?", (cutoff,))
-        if cur.rowcount:
-            logger.info("cleaned up %d old events at startup", cur.rowcount)
+    deleted = cleanup_old_events()
+    if deleted > 0:
+        logger.info("cleaned up %d old events at startup", deleted)
 
 
 def close_store() -> None:
@@ -85,26 +152,37 @@ def close_store() -> None:
         _store = None
 
 
-def touch_session(session_id: str, now: int) -> int | None:
+def touch_session(session_id: str, now: datetime) -> tuple[datetime, timedelta | None]:
     if _store is None or not session_id:
-        return None
+        logger.debug("no store or no session_id, skipping touch")
+        return now, None
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
     with _store_lock:
-        row = _store.execute(
-            "SELECT ts FROM sessions WHERE id = ?", (session_id,)
+        # Fetch last touch time for this session
+        row = cursor.execute(
+            "SELECT updated_at FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
-        prior = row[0] if row else 0
-        _store.execute(
-            "INSERT INTO sessions(id, ts) VALUES(?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET ts = excluded.ts",
+        time_diff = now - row[0] if row else None
+
+        # Update the session's touch time
+        cursor.execute(
+            "INSERT INTO sessions(id, updated_at) VALUES(?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at",
             (session_id, now),
         )
-    return prior
+        _store.commit()
+
+        return now, time_diff
 
 
-def _parse_datetime(dt_str: str) -> int:
+def _parse_datetime_(dt_str: str) -> int:
     if not dt_str or not isinstance(dt_str, str):
         raise ValueError("start_time/end_time must be a non-empty string")
+
     s = dt_str.strip().replace("Z", "+00:00")
+
     try:
         dt = _DateTime.fromisoformat(s)
     except ValueError as e:
@@ -112,20 +190,16 @@ def _parse_datetime(dt_str: str) -> int:
             f"Invalid datetime '{dt_str}'. Expected ISO 8601, e.g. "
             "'2024-01-15T14:30:00' or '2024-01-15T14:30:00+07:00'"
         ) from e
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=_resolve_local_tz())
+
     return int(dt.timestamp())
 
 
-def fmt_duration(prior_ts: int, now_ts: int) -> str:
-    delta = now_ts - prior_ts
-    if delta <= 0:
-        return "0m"
-    if delta < 60:
-        return "<1m"
-    rd = relativedelta(_DateTime.fromtimestamp(now_ts),
-                       _DateTime.fromtimestamp(prior_ts))
+def _format_relativedelta(rd: relativedelta) -> str:
     parts = []
+
     if rd.years:
         parts.append(f"{rd.years}y")
     if rd.months:
@@ -139,110 +213,82 @@ def fmt_duration(prior_ts: int, now_ts: int) -> str:
     return " ".join(parts) if parts else "<1m"
 
 
-def fmt_relative(now_ts: int, start_ts: int) -> str:
-    delta = abs(start_ts - now_ts)
+def fmt_duration(prior_ts: int, now_ts: int) -> str:
+    delta = now_ts - prior_ts
+
+    if delta <= 0:
+        return "0m"
     if delta < 60:
-        return "starting now" if start_ts > now_ts else "started just now"
-    core = fmt_duration(min(start_ts, now_ts), max(start_ts, now_ts))
-    return f"in {core}" if start_ts > now_ts else f"{core} ago"
+        return "<1m"
+
+    rd = relativedelta(
+        _DateTime.fromtimestamp(now_ts), _DateTime.fromtimestamp(prior_ts)
+    )
+    return _format_relativedelta(rd)
 
 
-def _start_time_hint(dt: _DateTime, now: _DateTime) -> str:
-    days = (dt.date() - now.date()).days
-    time_str = dt.strftime("%H:%M")
-    if days == 0:
-        return f"today at {time_str}"
-    if days == 1:
-        return f"tomorrow at {time_str}"
-    if days == -1:
-        return f"yesterday at {time_str}"
-    if days > 1:
-        return f"in {days} days at {time_str}"
-    return f"{abs(days)} days ago at {time_str}"
+# def _format_event(row: EventSchema) -> dict:
+#     now, _ = get_current_time()
 
-
-def _format_event(row: tuple, local_tz: _TzInfo, now_ts: int) -> dict:
-    event_id, title, description, start_time, end_time, reminder_offset, completed_at, _c, _u = row
-    start_dt = _DateTime.fromtimestamp(start_time, tz=local_tz)
-    now_dt = _DateTime.fromtimestamp(now_ts, tz=local_tz)
-    result = {
-        "event_id": event_id,
-        "title": title,
-        "description": description or "",
-        "start_time": f"{start_dt.strftime('%Y-%m-%d %H:%M %Z')} ({_start_time_hint(start_dt, now_dt)})",
-        "reminder_minutes_before": reminder_offset // 60,
-        "duration_minutes": (
-            (end_time - start_time) // 60
-            if end_time is not None
-            else DEFAULT_EVENT_DURATION_SECONDS // 60
-        ),
-        "completed": completed_at is not None,
-        "completed_at": (
-            _DateTime.fromtimestamp(
-                completed_at, tz=local_tz).strftime('%Y-%m-%d %H:%M %Z')
-            if completed_at is not None
-            else None
-        ),
-    }
-    if end_time is not None:
-        end_dt = _DateTime.fromtimestamp(end_time, tz=local_tz)
-        result["end_time"] = (
-            f"{end_dt.strftime('%Y-%m-%d %H:%M %Z')} "
-            f"({fmt_duration(start_time, end_time)})"
-        )
-    return result
+#     result = {
+#         "event_id": row.event_id,
+#         "title": row.title,
+#         "description": row.description,
+#         "start_time": f"{row.start_time.strftime('%Y-%m-%d %H:%M %Z')} ({humanize.naturaltime(now - row.start_time)})",
+#         "reminder_minutes_before": row.reminder_offset // 60,
+#         "duration_minutes": (
+#             (row.end_time - row.start_time) // 60
+#             if row.end_time is not None
+#             else DEFAULT_EVENT_DURATION_SECONDS // 60
+#         ),
+#         "completed": row.completed_at is not None,
+#         "completed_at": (
+#             row.completed_at
+#             if row.completed_at is not None
+#             else None
+#         ),
+#     }
+#     if row.end_time is not None:
+#         result["end_time"] = (
+#             f"{row.end_time.strftime('%Y-%m-%d %H:%M %Z')} "
+#             f"({humanize.naturaldelta(row.end_time - row.start_time)})"
+#         )
+#     return result
 
 
 def create_event(
-    title: str,
-    start_time: str,
-    end_time: str | None = None,
-    description: str | None = None,
-    reminder_minutes_before: int = DEFAULT_REMINDER_MINUTES,
-) -> dict:
+    event: EventSchema
+) -> EventSchema:
     if _store is None:
         raise RuntimeError("Store not initialized")
-    if not title or not isinstance(title, str):
-        raise ValueError("title must be a non-empty string")
 
-    start_ts = _parse_datetime(start_time)
-    end_ts = _parse_datetime(end_time) if end_time else None
-    reminder_offset = max(0, int(reminder_minutes_before)) * 60
-    now = int(time.time())
-    event_id = str(uuid.uuid4())
+    now, _ = get_current_time()
 
-    row = (
-        event_id, title, description or "", start_ts, end_ts,
-        reminder_offset, None, now, now,
-    )
     with _store_lock:
-        _store.execute(
-            "INSERT INTO events(event_id, title, description, start_time, end_time, "
+        cursor: sqlite3.Cursor = _store.cursor()
+
+        cursor.execute(
+            "INSERT INTO events(id, title, description, start_time, end_time, "
             "reminder_offset, completed_at, created_at, updated_at) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            row,
+            (event.id, event.title, event.description, event.start_time,
+             event.end_time, event.reminder_offset, event.completed_at, now, now),
         )
+        _store.commit()
 
-    return _format_event(row, _resolve_local_tz(), now)
+    return event
 
 
-def create_events(events: list[dict]) -> int:
+def create_events(events: list[EventSchema]) -> int:
     if _store is None:
         raise RuntimeError("Store not initialized")
+
     if not events:
         return 0
 
-    now = int(time.time())
-    records = []
-    for e in events:
-        start_ts = _parse_datetime(e["start_time"])
-        end_ts = _parse_datetime(e["end_time"]) if e.get("end_time") else None
-        reminder_offset = max(
-            0, int(e.get("reminder_minutes_before", DEFAULT_REMINDER_MINUTES))) * 60
-        records.append((
-            str(uuid.uuid4()), e["title"], e.get("description", ""),
-            start_ts, end_ts, reminder_offset, now, now,
-        ))
+    now, _ = get_current_time()
+
+    records = [(e.id, e.title, e.description, e.start_time, e.end_time, e.reminder_offset, now, now) for e in events]
 
     with _store_lock:
         _store.executemany(
@@ -253,43 +299,39 @@ def create_events(events: list[dict]) -> int:
     return len(records)
 
 
-def _get_local_day_bounds(local_tz: _TzInfo, now_ts: int) -> tuple[int, int]:
-    now_local = _DateTime.fromtimestamp(now_ts, tz=local_tz)
-    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + _datetime.timedelta(days=1)
-    return int(start_local.timestamp()), int(end_local.timestamp())
-
-
 def fetch_events(filter: str = "upcoming", limit: int = 10) -> list[dict]:
     if _store is None:
         return []
 
-    now = int(time.time())
-    local_tz = _resolve_local_tz()
+    _store.row_factory = eventschema_factory
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
+    now, _ = get_current_time()
     limit = max(1, min(int(limit), 100))
 
     if filter == "upcoming":
-        two_weeks = now + UPCOMING_LIMIT_DAYS * 86400
-        rows = _store.execute(
+        rows = cursor.execute(
             "SELECT * FROM events WHERE start_time > ? AND start_time <= ? "
             "AND completed_at IS NULL "
             "ORDER BY start_time ASC LIMIT ?",
-            (now, two_weeks, limit),
+            (now, timedelta(weeks=2), limit),
         ).fetchall()
     elif filter == "past":
-        rows = _store.execute(
+        rows = cursor.execute(
             "SELECT * FROM events WHERE start_time <= ? "
             "AND completed_at IS NULL "
             "ORDER BY start_time DESC LIMIT ?",
             (now, limit),
         ).fetchall()
     elif filter == "today":
-        day_start, day_end = _get_local_day_bounds(local_tz, now)
+        start_time = datetime.combine(now, t.min)
+        end_time = datetime.combine(now, t.max)
         rows = _store.execute(
             "SELECT * FROM events WHERE start_time >= ? AND start_time < ? "
             "AND completed_at IS NULL "
             "ORDER BY start_time ASC LIMIT ?",
-            (day_start, day_end, limit),
+            (start_time, end_time, limit),
         ).fetchall()
     else:
         rows = []
@@ -300,10 +342,16 @@ def fetch_events(filter: str = "upcoming", limit: int = 10) -> list[dict]:
 def fetch_event(event_id: str) -> dict | None:
     if _store is None:
         return None
-    row = _store.execute(
-        "SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
+    row = cursor.execute(
+        "SELECT * FROM events WHERE event_id = ?", (event_id,)
+    ).fetchone()
+
     if row is None:
         return None
+
     return _format_event(row, _resolve_local_tz(), int(time.time()))
 
 
@@ -338,43 +386,74 @@ def modify_event(event_id: str, **fields) -> dict | None:
     if not updates:
         return None
 
-    updates["updated_at"] = int(time.time())
+    now, _ = get_current_time()
+
+    updates["updated_at"] = now
     set_clause = ", ".join(f"{k} = ?" for k in updates)
+
     values = list(updates.values()) + [event_id]
 
+    cursor: sqlite3.Cursor = _store.cursor()
+
     with _store_lock:
-        cur = _store.execute(
-            f"UPDATE events SET {set_clause} WHERE event_id = ?", values)
+        cur = cursor.execute(
+            f"UPDATE events SET {set_clause} WHERE event_id = ?", values
+        )
+        _store.commit()
+
         if cur.rowcount == 0:
             return None
+
         return fetch_event(event_id)
 
 
 def remove_event(event_id: str) -> bool:
     if _store is None:
         return False
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
     with _store_lock:
-        cur = _store.execute(
+        cur = cursor.execute(
             "DELETE FROM events WHERE event_id = ?", (event_id,))
+        _store.commit()
+
         return cur.rowcount > 0
+
+
+def get_current_time():
+    tz_name = str(get_localzone())
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+
+    return now, tz
 
 
 def mark_event_complete(event_id: str) -> dict | None:
     if _store is None:
         return None
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
     with _store_lock:
-        row = _store.execute(
+        row = cursor.execute(
             "SELECT completed_at FROM events WHERE event_id = ?", (event_id,)
         ).fetchone()
+
         if row is None:
             return None
+
         if row[0] is not None:
             return fetch_event(event_id)
-        now = int(time.time())
-        _store.execute(
+
+        now, _ = get_current_time()
+
+        cursor.execute(
             "UPDATE events SET completed_at = ?, updated_at = ? WHERE event_id = ?",
             (now, now, event_id),
         )
+        _store.commit()
+
         return fetch_event(event_id)
 
 
@@ -413,8 +492,7 @@ def fetch_completed_events(filter: str = "upcoming", limit: int = 10) -> list[di
     return [_format_event(row, local_tz, now) for row in rows]
 
 
-def _parse_date_range(start_date: str,
-                      end_date: str | None) -> tuple[int, int]:
+def _parse_date_range(start_date: str, end_date: str | None) -> tuple[int, int]:
     """Parse 'YYYY-MM-DD' inputs to (start_ts, end_ts_exclusive) in local time.
 
     end_date is inclusive: the returned end_ts is start of the day after
@@ -428,17 +506,15 @@ def _parse_date_range(start_date: str,
     end_ts = _parse_datetime(end_date)
     if end_ts < start_ts:
         raise ValueError(
-            f"end_date ({end_date}) must be on or after start_date ({start_date})")
-    end_local_next = (
-        _DateTime.fromtimestamp(end_ts, tz=_resolve_local_tz())
-        + _datetime.timedelta(days=1)
-    )
+            f"end_date ({end_date}) must be on or after start_date ({start_date})"
+        )
+    end_local_next = _DateTime.fromtimestamp(
+        end_ts, tz=_resolve_local_tz()
+    ) + _datetime.timedelta(days=1)
     return start_ts, int(end_local_next.timestamp())
 
 
-def fetch_events_by_range(start_ts: int,
-                          end_ts: int,
-                          limit: int = 100) -> list[dict]:
+def fetch_events_by_range(start_ts: int, end_ts: int, limit: int = 100) -> list[dict]:
     """Return active events overlapping [start_ts, end_ts).
 
     An event is included if its start_time is before end_ts AND
@@ -458,9 +534,9 @@ def fetch_events_by_range(start_ts: int,
     return [_format_event(row, local_tz, int(time.time())) for row in rows]
 
 
-def fetch_completed_events_by_range(start_ts: int,
-                                    end_ts: int,
-                                    limit: int = 100) -> list[dict]:
+def fetch_completed_events_by_range(
+    start_ts: int, end_ts: int, limit: int = 100
+) -> list[dict]:
     """Return completed events whose completed_at falls in [start_ts, end_ts)."""
     if _store is None:
         return []
@@ -475,22 +551,39 @@ def fetch_completed_events_by_range(start_ts: int,
     return [_format_event(row, local_tz, int(time.time())) for row in rows]
 
 
-def cleanup_old_events(retention_days: int = EVENT_RETENTION_DAYS) -> int:
+def cleanup_old_events(retention_days: int = 30) -> int:
+    """Remove old events older than retention_days
+
+    Args:
+        retention_days (int, optional): Retention days. Defaults to 30 days.
+
+    Returns:
+        int: Number of events deleted.
+    """
     if _store is None:
         return 0
+
     cutoff = int(time.time()) - retention_days * 86400
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
     with _store_lock:
-        cur = _store.execute(
+        cur = cursor.execute(
             "DELETE FROM events WHERE start_time < ?", (cutoff,))
         return cur.rowcount
 
 
-def get_active_events(now_ts: int) -> tuple[list[str], list[str]]:
+def get_active_events(now: datetime) -> tuple[list[str], list[str]]:
     if _store is None:
+        logger.warning("database connection is not initialized")
         return [], []
 
-    local_tz = _resolve_local_tz()
-    rows = _store.execute(
+    # Get timezone from now datetime object
+    tz = now.tzinfo
+
+    cursor: sqlite3.Cursor = _store.cursor()
+
+    rows = cursor.execute(
         "SELECT title, start_time, end_time, reminder_offset FROM events "
         "WHERE ("
         "  (start_time - reminder_offset <= ? AND start_time + ? >= ?)"
@@ -498,21 +591,24 @@ def get_active_events(now_ts: int) -> tuple[list[str], list[str]]:
         ") "
         "AND completed_at IS NULL "
         "ORDER BY start_time ASC",
-        (now_ts, ACTIVE_WINDOW_AFTER_START_SECONDS, now_ts,
-         now_ts, now_ts),
+        (now, ACTIVE_WINDOW_AFTER_START_SECONDS, now, now, now),
     ).fetchall()
 
     upcoming: list[str] = []
     now_events: list[str] = []
-    for title, start_ts, end_ts, _ in rows:
+
+    for title, start_dt, end_dt, _ in rows:
         parts = [title]
-        if end_ts is not None:
-            end_str = _DateTime.fromtimestamp(
-                end_ts, tz=local_tz).strftime("%H:%M")
+
+        if end_dt is not None:
+            end_str = end_dt.astimezone(tz).strftime("%H:%M")
             parts.append(f"until {end_str}")
-        parts.append(f"({fmt_relative(now_ts, start_ts)})")
+
+        parts.append(
+            f"({humanize.naturaltime(now - start_dt.astimezone(tz))})")
         line = " ".join(parts)
-        if now_ts < start_ts:
+
+        if now < start_dt:
             upcoming.append(line)
         else:
             now_events.append(line)

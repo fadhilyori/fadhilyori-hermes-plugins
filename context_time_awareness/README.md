@@ -81,4 +81,4 @@ windows or to find the busiest day.
 
 ### Cleanup
 
-Events older than 30 days are removed once when the plugin starts. Long-term calendar tracking should remain in Google Calendar or another primary calendar integration.
+Events older than 30 days are removed once at plugin startup and at the start of every tool function call, keeping the store a transient reminder list rather than a persistent calendar. Long-term calendar tracking should remain in Google Calendar or another primary calendar integration.
