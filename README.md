@@ -4,7 +4,7 @@ A collection of plugins for the Hermes agent runtime.
 
 ## Plugins
 
-- [context_time_awareness](./context_time_awareness/README.md) - Injects current local time into LLM context on every turn, plus elapsed time since the last user message, with lightweight event scheduling.
+- [time_awareness](./time_awareness/README.md) - Injects the current local time into the LLM context on every turn so the agent understands the present time and day.
 
 ## Development
 
