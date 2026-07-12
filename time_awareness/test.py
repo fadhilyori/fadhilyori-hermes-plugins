@@ -54,27 +54,29 @@ class TestInjectContext(unittest.TestCase):
         result = plugin.inject_context()
         self.assertRegex(
             result["context"],
-            r"[A-Za-z]+(?:/[A-Za-z_]+)+\s*$",
+            r"[A-Za-z]+(?:/[A-Za-z_]+)*\s*$",
         )
 
-    def test_fallback_to_utc_when_get_localzone_fails(self):
-        with patch("time_awareness.plugin.get_localzone", side_effect=Exception("boom")):
+    def test_uses_configured_timezone_when_available(self):
+        jakarta = ZoneInfo("Asia/Jakarta")
+        with patch("time_awareness.plugin.get_timezone", return_value=jakarta):
             result = plugin.inject_context()
-        self.assertIn("UTC", result["context"])
+        self.assertIn("Asia/Jakarta", result["context"])
+        self.assertIn("+07:00", result["context"])
 
-    def test_fallback_to_utc_for_invalid_timezone(self):
-        with patch(
-            "time_awareness.plugin.get_localzone",
-            return_value="Invalid/Zone",
-        ):
+    def test_falls_back_to_local_time_when_no_timezone_configured(self):
+        local_now = datetime(2026, 7, 12, 15, 30, tzinfo=ZoneInfo("Etc/GMT-7"))
+        with patch("time_awareness.plugin.get_timezone", return_value=None), \
+             patch("time_awareness.plugin.now", return_value=local_now):
             result = plugin.inject_context()
-        self.assertIn("UTC", result["context"])
+        self.assertRegex(result["context"], r"[+-]\d{2}:\d{2}")
+        self.assertNotIn("+00:00", result["context"])
 
-    def test_fallback_to_utc_when_tzlocal_not_installed(self):
-        with patch("time_awareness.plugin.get_localzone", None):
+    def test_falls_back_to_local_time_when_hermes_time_raises(self):
+        with patch("time_awareness.plugin.now", side_effect=Exception("boom")), \
+             patch("time_awareness.plugin.get_timezone", side_effect=Exception("boom")):
             result = plugin.inject_context()
-        self.assertIn("UTC", result["context"])
-        self.assertRegex(result["context"], r"\+00:00")
+        self.assertRegex(result["context"], r"[+-]\d{2}:\d{2}")
 
 
 if __name__ == "__main__":
