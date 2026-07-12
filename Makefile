@@ -18,14 +18,17 @@ test:
 ifndef PLUGIN
 	$(error PLUGIN is required. Usage: make test PLUGIN=time_awareness)
 endif
-	python3 -m unittest discover -s $(PLUGIN) -p "test.py" -v
+	uv run python3 -m $(PLUGIN).test -v
 
 test-all:
-	@for d in $(PLUGIN_DIRS); do \
-		echo "==> Testing $$d"; \
-		python3 -m unittest discover -s $$d -p "test.py" -v || exit 1; \
+	@status=0; \
+	for d in $(PLUGIN_DIRS); do \
+		plugin=$${d%/}; \
+		echo "==> Testing $$plugin"; \
+		uv run python3 -m $$plugin.test -v || status=1; \
 		echo; \
-	done
+	done; \
+	exit $$status
 
 clean:
 	@find $(PLUGIN_DIRS) -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

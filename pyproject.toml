@@ -1,0 +1,9 @@
+[project]
+name = "hermes-plugins"
+version = "0.1.0"
+description = "A collection of plugins for the Hermes agent runtime."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "hermes-agent>=0.18.2",
+]
