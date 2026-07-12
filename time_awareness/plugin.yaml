@@ -1,0 +1,6 @@
+name: time_awareness
+version: 1.0.0
+description: Simply injects time into the LLM context to help agent understand the current time.
+author: fadhilyori
+provides_hooks:
+  - pre_llm_call

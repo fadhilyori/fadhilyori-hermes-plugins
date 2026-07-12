@@ -16,7 +16,7 @@ list:
 
 test:
 ifndef PLUGIN
-	$(error PLUGIN is required. Usage: make test PLUGIN=hook_inject_time)
+	$(error PLUGIN is required. Usage: make test PLUGIN=time_awareness)
 endif
 	python3 -m unittest discover -s $(PLUGIN) -p "test.py" -v
 
