@@ -4,3 +4,5 @@ description: Simply injects time into the LLM context to help agent understand t
 author: fadhilyori
 provides_hooks:
   - pre_llm_call
+pip_dependencies:
+  - tzlocal>=5.4.4
