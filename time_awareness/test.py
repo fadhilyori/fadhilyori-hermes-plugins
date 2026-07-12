@@ -3,7 +3,7 @@ from datetime import datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from time_awareness import plugin
+from . import plugin
 
 
 class TestBuildContext(unittest.TestCase):
