@@ -70,6 +70,12 @@ class TestInjectContext(unittest.TestCase):
             result = plugin.inject_context()
         self.assertIn("UTC", result["context"])
 
+    def test_fallback_to_utc_when_tzlocal_not_installed(self):
+        with patch("time_awareness.plugin.get_localzone", None):
+            result = plugin.inject_context()
+        self.assertIn("UTC", result["context"])
+        self.assertRegex(result["context"], r"\+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()
